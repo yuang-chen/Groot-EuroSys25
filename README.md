@@ -2,7 +2,7 @@
 Groot: Graph-Centric Row Reordering with Tree for Sparse Matrix Multiplication on Tensor Cores
 
 ## Prerequisites
-- CMake (3.8 or higher)
+- CMake (3.22 or higher)
 - CUDA Toolkit
 - KGraph (https://github.com/aaalgo/kgraph)
 - Boost (required by KGraph)
