@@ -8,6 +8,8 @@ Groot: Graph-Centric Row Reordering with Tree for Sparse Matrix Multiplication o
 - Boost (required by KGraph)
 
 ## Build using CMake
+Note: You may need to modify the CMakeLists.txt file to match your GPU architecture and library paths.
+
 ```
 mkdir build
 cd build
