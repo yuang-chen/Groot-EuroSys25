@@ -1,0 +1,852 @@
+#pragma once
+
+// #include <groot/matrices/csr.h>
+// #include <groot/operations/random.h>
+// #include <groot/utils/report.h>
+// #include <groot/utils/timer.h>
+
+// C++ Standard Library
+#include <algorithm>
+#include <cmath>
+#include <queue>
+#include <set>
+#include <stack>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
+
+// Third-party Libraries
+#include <kgraph.h>
+#include <thrust/system/omp/execution_policy.h>
+
+namespace groot {
+
+template<typename T>
+using AdjVector = thrust::host_vector<thrust::host_vector<T>>;
+
+template<typename T>
+using AdjOracle = kgraph::VectorOracle<AdjVector<T>, thrust::host_vector<T>>;
+
+template<typename T>
+using AdjHash = std::unordered_map<int, std::vector<T>>;
+
+template<typename T>
+struct Tree {
+    T          num_nodes{0};
+    AdjHash<T> adjs;
+};
+
+template<typename T, typename U>
+using MinHeapPair =
+    std::priority_queue<std::pair<T, U>, thrust::host_vector<std::pair<T, U>>, std::greater<std::pair<T, U>>>;
+
+// Function to compute proximity weight based on distance between
+// positions. Larger distances lead to larger penalties
+inline float weight_function(int a, int b)
+{
+    return static_cast<float>(std::abs(a - b));
+}
+
+auto sparse_weighted_hamming_distance = [](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b) {
+    double weighted_distance = 0.0;  // Raw weighted distance
+    int    hamming_distance  = 0;    // Count of differing positions
+    int    i = 0, j = 0;
+
+    // Calculate the raw distance
+    while (i < a.size() && j < b.size()) {
+        if (a[i] < b[j]) {
+            weighted_distance += weight_function(a[i], b[j]);
+            ++hamming_distance;
+            ++i;
+        }
+        else if (a[i] > b[j]) {
+            weighted_distance += weight_function(a[i], b[j]);
+            ++hamming_distance;
+            ++j;
+        }
+        else {
+            ++i;
+            ++j;
+        }
+    }
+
+    // Handle remaining elements in array 'a' (no match in 'b')
+    while (i < a.size()) {
+        weighted_distance += weight_function(a[i], b.empty() ? a[i] : b.back());
+        ++hamming_distance;  // Increment count of differing positions
+        ++i;
+    }
+
+    // Handle remaining elements in array 'b' (no match in 'a')
+    while (j < b.size()) {
+        weighted_distance += weight_function(b[j], a.empty() ? b[j] : a.back());
+        ++hamming_distance;  // Increment count of differing positions
+        ++j;
+    }
+
+    // Normalize the raw distance
+    int    max_pos            = std::max(a.empty() ? 0 : a.back(), b.empty() ? 0 : b.back());
+    double max_weight         = hamming_distance * weight_function(max_pos, 0);
+    double normalized_weights = (weighted_distance / (max_weight + 1e-6));
+    // Add the differing count to the normalized distance
+    double final_distance = normalized_weights + hamming_distance;
+
+    return static_cast<float>(final_distance);
+};
+
+auto sparse_hamming_dist_with_simple_proximity =
+    [](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b, int N) {
+        int D = 0;  // Number of differing positions
+        int i = 0, j = 0;
+        int first_diff_position = -1;
+        int last_diff_position  = -1;
+
+        // Compute the differing positions and Hamming distance
+        while (i < a.size() && j < b.size()) {
+            if (a[i] < b[j]) {
+                int pos = a[i];
+                if (first_diff_position == -1) {
+                    first_diff_position = pos;
+                }
+                last_diff_position = pos;
+                ++i;
+                ++D;
+            }
+            else if (a[i] > b[j]) {
+                int pos = b[j];
+                if (first_diff_position == -1) {
+                    first_diff_position = pos;
+                }
+                last_diff_position = pos;
+                ++j;
+                ++D;
+            }
+            else {
+                ++i;
+                ++j;
+            }
+        }
+        // Process remaining elements in 'a'
+        while (i < a.size()) {
+            int pos = a[i];
+            if (first_diff_position == -1) {
+                first_diff_position = pos;
+            }
+            last_diff_position = pos;
+            ++i;
+            ++D;
+        }
+        // Process remaining elements in 'b'
+        while (j < b.size()) {
+            int pos = b[j];
+            if (first_diff_position == -1) {
+                first_diff_position = pos;
+            }
+            last_diff_position = pos;
+            ++j;
+            ++D;
+        }
+
+        // Primary distance: Hamming distance normalized by vector length
+        float distance = static_cast<float>(D) / N;
+
+        // Secondary priority: Proximity penalty based on the gap between first
+        // and last differing positions
+        float proximity_penalty = 0.0f;
+        if (D > 1) {
+            int total_gap = last_diff_position - first_diff_position;
+            // Normalize total gap to [0,1] by dividing by maximum possible gap
+            // (N - 1)
+            float normalized_total_gap = static_cast<float>(total_gap) / (N - 1);
+            proximity_penalty          = normalized_total_gap;
+        }
+
+        // Adjust the distance with a small epsilon to prioritize proximity when
+        // D is equal
+        float epsilon = 1e-6f;  // Small value to ensure proximity affects
+                                // ordering minimally
+        distance += proximity_penalty * epsilon;
+
+        return distance;
+    };
+
+auto sparse_hamming_dist_with_proximity =
+    [](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b, int N) {
+        int              D = 0;  // Number of differing positions
+        int              i = 0, j = 0;
+        std::vector<int> diff_positions;
+
+        // Compute the differing positions and Hamming distance
+        while (i < a.size() && j < b.size()) {
+            if (a[i] < b[j]) {
+                diff_positions.push_back(a[i]);
+                ++i;
+                ++D;
+            }
+            else if (a[i] > b[j]) {
+                diff_positions.push_back(b[j]);
+                ++j;
+                ++D;
+            }
+            else {
+                ++i;
+                ++j;
+            }
+        }
+        // Process remaining elements in 'a'
+        while (i < a.size()) {
+            diff_positions.push_back(a[i]);
+            ++i;
+            ++D;
+        }
+        // Process remaining elements in 'b'
+        while (j < b.size()) {
+            diff_positions.push_back(b[j]);
+            ++j;
+            ++D;
+        }
+
+        // Primary distance: Hamming distance normalized by vector length
+        float distance = static_cast<float>(D) / N;
+
+        // Secondary priority: Proximity penalty
+        float proximity_penalty = 0.0f;
+        if (D > 1) {
+            // Calculate total gap between differing positions
+            int total_gap = 0;
+            for (int k = 1; k < diff_positions.size(); ++k) {
+                total_gap += diff_positions[k] - diff_positions[k - 1];
+            }
+            // Calculate average gap
+            float average_gap = static_cast<float>(total_gap) / (D - 1);
+            // Normalize average gap to [0,1] by dividing by maximum possible gap (N
+            // - 1)
+            float normalized_average_gap = average_gap / (N - 1);
+            proximity_penalty            = normalized_average_gap;
+        }
+
+        // Adjust the distance with a small epsilon to prioritize proximity when D
+        // is equal
+        float epsilon = 1e-6f;  // Small value to ensure proximity affects ordering minimally
+        distance += proximity_penalty * epsilon;
+
+        return distance;
+    };
+
+auto sparse_hamming_distance = [](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b) {
+    float distance = 0;
+    int   i = 0, j = 0;
+
+    while (i < a.size() && j < b.size()) {
+        if (a[i] < b[j]) {
+            ++i;
+            ++distance;
+        }
+        else if (a[i] > b[j]) {
+            ++j;
+            ++distance;
+        }
+        else {
+            ++i;
+            ++j;
+        }
+    }
+    // Remaining elements in array 'a' add to distance
+    distance += a.size() - i;
+
+    // Remaining elements in array 'b' add to distance
+    distance += b.size() - j;
+
+    return distance;
+};
+
+auto sparse_hamming_distance_epsilon = [](int nrow) {
+    return [nrow](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b) {
+        float distance = 0;
+        int   i = 0, j = 0;
+
+        while (i < a.size() && j < b.size()) {
+            if (a[i] < b[j]) {
+                ++i;
+                ++distance;
+            }
+            else if (a[i] > b[j]) {
+                ++j;
+                ++distance;
+            }
+            else {
+                ++i;
+                ++j;
+            }
+        }
+        // Remaining elements in array 'a' add to distance
+        distance += a.size() - i;
+
+        // Remaining elements in array 'b' add to distance
+        distance += b.size() - j;
+        int   max_pos = std::max(a.empty() ? 0 : a.back(), b.empty() ? 0 : b.back());
+        int   min_pos = std::min(a.empty() ? 0 : a.front(), b.empty() ? 0 : b.front());
+        int   range   = max_pos - min_pos;
+        float epsilon = static_cast<float>(range) / (nrow + 1e-6);
+        if (epsilon < 0 && epsilon >= 1) {
+            printf("epsilon %f, range %d, nrow %d\n", epsilon, range, nrow);
+        }
+        return distance + epsilon;
+    };
+};
+
+auto sparse_jaccard_distance = [](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b) {
+    if (a.empty() || b.empty()) {
+        return 1.0f;
+    }
+
+    int intersection   = 0;
+    int total_nonzeros = a.size() + b.size();
+    int i = 0, j = 0;
+
+    while (i < a.size() && j < b.size()) {
+        if (a[i] < b[j]) {
+            i++;
+        }
+        else if (a[i] > b[j]) {
+            j++;
+        }
+        else {
+            intersection++;
+            i++;
+            j++;
+        }
+    }
+
+    // Calculate union size
+    int union_size = total_nonzeros - intersection;
+    // printf("intersection %d, union %d\n", intersection, union_size);
+    //  Avoid division by zero
+    if (union_size == 0)
+        return 0.0f;
+
+    // Return Jaccard distance
+    return static_cast<float>(1.0 - static_cast<double>(intersection) / union_size);
+};
+
+template<typename CSR>
+void convert_csr_to_adj(const CSR& mat, AdjVector<int>& adj)
+{
+    adj.resize(mat.num_rows);
+
+    thrust::host_vector<int> rowptr_h = mat.row_pointers;
+
+#pragma omp parallel for
+    for (int i = 0; i < mat.num_rows; i++) {
+        const auto row_begin  = rowptr_h[i];
+        const auto row_end    = rowptr_h[i + 1];
+        const auto row_length = row_end - row_begin;
+
+        adj[i].resize(row_length);
+
+        thrust::copy(mat.column_indices.begin() + row_begin, mat.column_indices.begin() + row_end, adj[i].begin());
+    }
+}
+
+template<typename Params>
+void set_index_params(Params& index_params, int K, int L)
+{
+    index_params.K          = K;
+    index_params.L          = L;
+    index_params.reverse    = 0;
+    index_params.iterations = 15;
+    // index_params.S = 10;
+    // index_params.R = 0.002;
+    // index_params.controls = 0.7;
+    // index_params.recall = 1;
+    // index_params.delta = 100;
+    // index_params.seed = top_k;
+}
+
+template<typename Params>
+void set_search_params(Params& search_params, int K)
+{
+    search_params.K = K;
+    // search_params.M = 100;
+    // search_params.P = 0.0;
+    // search_params.S = 1000;
+    // search_params.T = 1;
+    // search_params.epsilon = 0.0;
+    // search_params.init = 1000;
+    // search_params.seed = 1;
+}
+
+template<typename CSR1, typename CSR2>
+auto build_KNN(const CSR1& mat, CSR2& knn)
+{
+    const auto     nrow = mat.num_rows;
+    AdjVector<int> graph;
+
+    convert_csr_to_adj(mat, graph);
+    AdjOracle<int> oracle(graph, sparse_hamming_distance_epsilon(nrow));
+
+    kgraph::KGraph::IndexParams  index_params;
+    kgraph::KGraph::SearchParams search_params;
+    //! parameter tuning:
+    //! https://github.com/Lsyhprum/WEAVESS/tree/dev/parameters
+    unsigned i_k = std::min<unsigned>(nrow - 1, 20);  // 200
+    unsigned i_l = std::min<unsigned>(i_k + 50, 30);  // 300
+    unsigned s_k = std::min<unsigned>(nrow - 1, 25);  // 250
+    set_index_params(index_params, i_k, i_l);
+    set_search_params(search_params, s_k);
+
+    kgraph::KGraph* index = kgraph::KGraph::create();
+    index->build(oracle, index_params);
+    const unsigned nnz = nrow * s_k;
+    ASSERT(nnz < std::numeric_limits<unsigned>::max());
+
+    knn.resize(nrow, nrow, nnz);
+    thrust::sequence(knn.row_pointers.begin(), knn.row_pointers.end(), unsigned(0), s_k);
+
+#pragma omp parallel for
+    for (unsigned i = 0; i < nrow; i++) {
+        auto&                      query     = graph[i];
+        auto                       row_begin = i * s_k;
+        kgraph::KGraph::SearchInfo info;
+        index->search(oracle.query(query),
+                      search_params,
+                      knn.column_indices.data() + row_begin,
+                      knn.values.data() + row_begin,
+                      &info);
+    }
+    delete index;
+}
+
+template<typename CSR1, typename CSR2>
+auto build_KNN_offline(const CSR1& mat, CSR2& knn)
+{
+    const auto     nrow = mat.num_rows;
+    AdjVector<int> graph;
+
+    convert_csr_to_adj(mat, graph);
+    AdjOracle<int> oracle(graph, sparse_hamming_distance);
+
+    kgraph::KGraph::IndexParams index_params;
+    //! parameter tuning:
+    //! https://github.com/Lsyhprum/WEAVESS/tree/dev/parameters
+    unsigned i_k = std::min<unsigned>(nrow - 1, 200);
+    unsigned i_l = std::min<unsigned>(i_k + 50, 300);
+    set_index_params(index_params, i_k, i_l);
+
+    kgraph::KGraph* index = kgraph::KGraph::create();
+    index->build(oracle, index_params);
+
+    const unsigned nnz = nrow * i_k;
+    ASSERT(nnz < std::numeric_limits<unsigned>::max());
+    knn.resize(nrow, nrow, nnz);
+    thrust::sequence(knn.row_pointers.begin(), knn.row_pointers.end(), unsigned(0), i_k);
+
+#pragma omp parallel for
+    for (unsigned i = 0; i < nrow; i++) {
+        auto row_begin = i * i_k;
+        index->get_nn(i, knn.column_indices.data() + row_begin, knn.values.data() + row_begin, &i_k, &i_l);
+    }
+    delete index;
+}
+
+template<typename COO>
+void print_zeros(const COO& coo, const std::string& str)
+{
+    using IndexType = typename COO::index_type;
+    using ValueType = typename COO::value_type;
+
+    printf("%s\n", str.c_str());
+    thrust::host_vector<IndexType> values_h         = coo.values;
+    thrust::host_vector<IndexType> row_indices_h    = coo.row_indices;
+    thrust::host_vector<ValueType> column_indices_h = coo.column_indices;
+
+    for (int i = 0; i < coo.num_entries; i++) {
+        if (coo.values[i] == 0) {
+            printf("%d: (%d, %d, %f), ", i, coo.row_indices[i], coo.column_indices[i], coo.values[i]);
+        }
+    }
+    printf("\n\n");
+}
+
+template<typename COO>
+bool is_undirected(const COO& coo)
+{
+    using IndexType = typename COO::index_type;
+
+    // Create a vector of pairs representing edges
+    thrust::host_vector<thrust::pair<IndexType, IndexType>> edges(coo.num_entries);
+
+    // Fill the edges vector
+    thrust::transform(
+        thrust::make_zip_iterator(thrust::make_tuple(coo.row_indices.begin(), coo.column_indices.begin())),
+        thrust::make_zip_iterator(thrust::make_tuple(coo.row_indices.end(), coo.column_indices.end())),
+        edges.begin(),
+        [] __host__ __device__(const thrust::tuple<IndexType, IndexType>& t) {
+            return thrust::make_pair(thrust::get<0>(t), thrust::get<1>(t));
+        });
+
+    // Sort the edges
+    thrust::sort(edges.begin(), edges.end());
+
+    // Create a vector of reversed edges
+    thrust::host_vector<thrust::pair<IndexType, IndexType>> reversed_edges(coo.num_entries);
+    thrust::transform(edges.begin(),
+                      edges.end(),
+                      reversed_edges.begin(),
+                      [] __host__ __device__(const thrust::pair<IndexType, IndexType>& p) {
+                          return thrust::make_pair(p.second, p.first);
+                      });
+
+    // Sort the reversed edges
+    thrust::sort(reversed_edges.begin(), reversed_edges.end());
+
+    // Check if all reversed edges exist in the original edge set
+    return std::includes(edges.begin(), edges.end(), reversed_edges.begin(), reversed_edges.end());
+}
+
+template<typename CSR>
+bool is_connected(CSR& mat)
+{
+    using IndexType = typename CSR::index_type;
+    auto num_nodes  = mat.num_rows;
+
+    std::vector<bool>     visited(num_nodes, false);
+    std::queue<IndexType> queue;
+
+    // Start BFS from the first curr (assuming curr 0 exists)
+    queue.push(0);
+    visited[0]              = true;
+    IndexType visited_count = 1;
+
+    // Perform BFS
+    while (!queue.empty()) {
+        auto curr = queue.front();
+        queue.pop();
+
+        // Visit all nexts
+        for (auto i = mat.row_pointers[curr]; i < mat.row_pointers[curr + 1]; ++i) {
+            auto next = mat.column_indices[i];
+            if (!visited[next]) {
+                visited[next] = true;
+                queue.push(next);
+                visited_count++;
+            }
+        }
+    }
+    return visited_count == num_nodes;
+}
+
+template<typename IndexType>
+bool is_connected_tree(Tree<IndexType>& tree)
+{
+    auto num_nodes = tree.num_nodes;
+
+    std::vector<bool>     visited(num_nodes, false);
+    std::queue<IndexType> queue;
+
+    // Start BFS from the first curr (assuming curr 0 exists)
+    queue.push(0);
+    visited[0]              = true;
+    IndexType visited_count = 1;
+
+    // Perform BFS
+    while (!queue.empty()) {
+        auto curr = queue.front();
+        queue.pop();
+
+        if (tree.adjs.find(curr) == tree.adjs.end()) {
+            continue;
+        }
+        // Visit all nexts
+        for (const auto& next : tree.adjs.at(curr)) {
+            if (!visited[next]) {
+                visited[next] = true;
+                queue.push(next);
+                visited_count++;
+            }
+        }
+    }
+    return visited_count == num_nodes;
+}
+
+template<typename CSR, typename COO>
+void clean_graph(const CSR& csr, COO& coo)
+{
+    using IndexType = typename CSR::index_type;
+    using ValueType = typename CSR::value_type;
+
+    thrust::host_vector<IndexType> row_indices(csr.num_entries);
+
+    // uA.num_rows = A.num_rows;
+    // uA.num_cols = A.num_cols;
+    // uA.num_entries= A.num_entries;
+    thrust::host_vector<ValueType> values_h         = csr.values;
+    thrust::host_vector<IndexType> row_pointers_h   = csr.row_pointers;
+    thrust::host_vector<IndexType> column_indices_h = csr.column_indices;
+
+    coo.resize(csr.num_rows, csr.num_cols, csr.num_entries);
+    coo.column_indices = csr.column_indices;
+    coo.values         = csr.values;
+    get_row_indices_from_pointers(csr.row_pointers, coo.row_indices);
+
+    // if (is_undirected(coo)) {
+    //     printf("Graph is undirected\n");
+    // } else {
+    //     printf("Graph is directed\n");
+    //     std::exit(1);
+    // }
+    // print_zeros(coo, "before clean");
+
+    auto row_col_begin =
+        thrust::make_zip_iterator(thrust::make_tuple(coo.row_indices.begin(), coo.column_indices.begin()));
+
+    // Sort by (row, col)
+    sort_columns_per_row(coo.row_indices, coo.column_indices, coo.values);
+
+    // print_zeros(coo, "after sort");
+    //  Remove duplicates
+    auto unique_end  = thrust::unique_by_key(row_col_begin, row_col_begin + coo.num_entries, coo.values.begin());
+    auto unique_size = thrust::distance(row_col_begin, unique_end.first);
+    coo.resize(coo.num_rows, coo.num_cols, unique_size);
+
+    // print_zeros(coo, "after unique");
+    //  Remove self-loop
+    auto row_col_val_begin = thrust::make_zip_iterator(
+        thrust::make_tuple(coo.row_indices.begin(), coo.column_indices.begin(), coo.values.begin()));
+    auto row_col_val_end = thrust::make_zip_iterator(
+        thrust::make_tuple(coo.row_indices.end(), coo.column_indices.end(), coo.values.end()));
+
+    // Resize the matrix
+    auto new_end  = thrust::remove_if(row_col_val_begin, row_col_val_end, IsSelfLoop<IndexType, ValueType>());
+    int  new_size = thrust::distance(row_col_val_begin, new_end);
+    coo.resize(coo.num_rows, coo.num_cols, new_size);
+
+    printf("unique size %d, new size %d\n", unique_size, new_size);
+    // print_zeros(coo, "after self-loop");
+    // Sort by values
+    thrust::sort_by_key(
+        coo.values.begin(),
+        coo.values.end(),
+        thrust::make_zip_iterator(thrust::make_tuple(coo.row_indices.begin(), coo.column_indices.begin())));
+    // print_zeros(coo, "after sort by values");
+}
+
+// Tune K, check connectivity
+// TODO: parallel MST - https://github.com/abarankab/parallel-boruvka
+//? Reference:
+// https://www.geeksforgeeks.org/kruskals-minimum-spanning-tree-using-stl-in-c/
+template<typename COO, typename Tree, typename Vector>
+auto build_MST(const COO& coo, Tree& tree, Vector& roots)
+{
+    using T = typename Vector::value_type;
+    using F = typename COO::value_type;
+
+    F          MST_weights = 0.0;
+    const auto nrow        = coo.num_rows;
+    const auto nnz         = coo.num_entries;
+
+    thrust::host_vector<T> parents(nrow);
+    thrust::host_vector<T> ranks(nrow);
+
+    thrust::sequence(parents.begin(), parents.end(), 0);
+    // find
+    auto find = [&parents](int i) {
+        while (parents[i] != i) {
+            i = parents[i];
+        }
+        return i;
+    };
+    // union with rank
+    auto unite_rank = [&find, &ranks, &parents](T i, T j) {
+        i = find(i);
+        j = find(j);
+        if (ranks[i] > ranks[j]) {
+            std::swap(i, j);
+        }
+        parents[i] = j;
+        if (ranks[i] == ranks[j]) {
+            ranks[j]++;
+        }
+    };
+
+    // union without rank
+    auto unite = [&find, &ranks, &parents](T i, T j) {
+        i          = find(i);
+        j          = find(j);
+        parents[i] = j;
+    };
+
+    // O(ElogV)  parents[source] = root
+    // tree.adjs[source] = parents[source];
+    for (T i = 0; i < nnz; i++) {
+        auto source = coo.row_indices[i];
+        auto target = coo.column_indices[i];
+        auto weight = coo.values[i];
+
+        if (find(source) != find(target)) {
+            MST_weights += weight;
+            unite_rank(source, target);
+            tree.adjs[source].push_back(target);
+            tree.adjs[target].push_back(source);
+        }
+    }
+    tree.num_nodes = nrow;
+
+    // verify for MST: num_edges = num_nodes - 1
+    {
+        auto num_edges = 0;
+        for (const auto& [node, adjs] : tree.adjs) {
+            num_edges += adjs.size();
+        }
+        printf("total edges in tree: %d, expected edges: %d\n", num_edges, 2 * tree.num_nodes - 2);
+    }
+    // print_vec(parents, "parents ", 16);
+    // print_vec(ranks, "ranks ", 16);
+    // Collect root nodes (nodes where parents[i] == i)
+    std::copy_if(thrust::counting_iterator<T>(0),
+                 thrust::counting_iterator<T>(nrow),
+                 std::back_inserter(roots),
+                 [parents_ptr = parents.data()](T i) { return i == parents_ptr[i]; });
+    printf("roots.size() = %d\n", roots.size());
+
+    return MST_weights;
+}
+
+template<typename Tree, typename Vector>
+auto perform_DFS(const Tree& tree, const Vector& roots, Vector& new_ids)
+{
+    using T = typename Vector::value_type;
+
+    const auto                  num_nodes = tree.num_nodes;
+    T                           max_depth = 0;
+    std::stack<std::pair<T, T>> node_stack;  // (node, depth)
+    std::vector<bool>           visited(num_nodes, false);
+    std::vector<T>              ordered_nodes;
+
+    ordered_nodes.reserve(num_nodes);
+
+    // auto max_root = *std::max_element(par, roots.begin(),
+    // roots.end()); fmt::println("max_root: {}", max_root);
+    // print_vec(roots, "roots ", 16);
+    // print_vec(tree.row_pointers, "row_pointers ", 16);
+    // print_vec(tree.column_indices, "column_indices ", 16);
+
+    for (const auto root : roots) {
+        node_stack.push({root, 0});
+    }
+
+    while (!node_stack.empty()) {
+        auto [curr, depth] = node_stack.top();
+        node_stack.pop();
+
+        if (visited[curr] == true) {
+            continue;
+        }
+        visited[curr] = true;
+        ordered_nodes.push_back(curr);
+        max_depth = std::max(max_depth, depth);
+
+        if (tree.adjs.find(curr) == tree.adjs.end()) {
+            continue;
+        }
+        for (auto it = tree.adjs.at(curr).rbegin(); it != tree.adjs.at(curr).rend(); ++it) {
+            if (visited[*it] == false) {
+                node_stack.push({*it, depth + 1});
+            }
+        }
+    }
+    // std::cout << adj.size() << " " << ordered_nodes.size() <<
+    // std::endl;
+    ASSERT(num_nodes == ordered_nodes.size());
+
+    new_ids.resize(num_nodes);
+
+    thrust::scatter(thrust::make_counting_iterator<int>(0),
+                    thrust::make_counting_iterator<int>(num_nodes),
+                    ordered_nodes.begin(),
+                    new_ids.begin());
+
+    // print_vec(ordered_nodes, "ordered_nodes ", 16);
+    // print_vec(new_ids, "new_ids ", 16);
+
+    return max_depth;
+}
+
+
+
+
+template<typename CsrMatrix, typename CooMatrix>
+void copy_csr_to_coo(const CsrMatrix& csr, CooMatrix& coo)
+{
+    using IndexType = typename CsrMatrix::index_type;
+    using ValueType = typename CsrMatrix::value_type;
+
+    coo.num_rows    = csr.num_rows;
+    coo.num_cols    = csr.num_cols;
+    coo.num_entries = csr.num_entries;
+
+    coo.row_indices.resize(csr.num_entries);
+    coo.column_indices.resize(csr.num_entries);
+    coo.values.resize(csr.num_entries);
+
+    // Copy column indices and values directly
+
+    // Generate row indices
+    thrust::device_vector<IndexType> row_indices(csr.num_entries);
+    get_row_indices_from_pointers(csr.row_pointers, row_indices);
+
+    thrust::copy(csr.column_indices.begin(), csr.column_indices.end(), coo.column_indices.begin());
+    thrust::copy(csr.values.begin(), csr.values.end(), coo.values.begin());
+    thrust::copy(row_indices.begin(), row_indices.end(), coo.row_indices.begin());
+}
+
+template<typename CSR, typename Vector>
+auto groot(const CSR& mat, Vector& new_ids)
+{
+    CPUTimer timer;
+    //+++++++++
+    //++ KNN ++
+    //+++++++++
+    std::cout << "Step 1: KNN" << std::endl;
+    // Kgraph requires unsigned index type
+    CsrMatrix<unsigned, float, host_memory> knn;
+
+    timer.start();
+
+    build_KNN_offline(mat, knn);  // reverse edges -> undirected
+    timer.stop();
+    printf("[kGraph] time (ms): %f \n", timer.elapsed());
+
+    ASSERT(knn.num_entries == knn.row_pointers.back() && knn.num_entries == knn.column_indices.size());
+
+    //+++++++++
+    //++ MST ++
+    //+++++++++
+    std::cout << "Step 2: MST" << std::endl;
+    //? csr -> coo
+    CooMatrix<unsigned, float, host_memory> uknn;
+    clean_graph(knn, uknn);  // prepare for MST
+
+    //? csr -> coo
+    Tree<unsigned>           tree;
+    thrust::host_vector<int> roots;
+    timer.start();
+    auto weights = build_MST(uknn, tree, roots);
+    timer.stop();
+    printf("[MST] time (ms): %f \n", timer.elapsed());
+    printf("total weights of MST: %.2f\n", weights);
+
+    //++++++++++++
+    //++ DFS ++
+    //++++++++++++
+    std::cout << "Step 3: DFS" << std::endl;
+    timer.start();
+    auto depth = perform_DFS(tree, roots, new_ids);
+    timer.stop();
+    printf("[DFS] time (ms): %f \n", timer.elapsed());
+    ASSERT(new_ids.size() == mat.num_rows);
+
+    printf("Max Depth: %d\n", depth);
+}
+
+}  // namespace groot
