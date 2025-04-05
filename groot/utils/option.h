@@ -22,7 +22,7 @@ const char* reorder_algo_to_string(ReorderAlgo algo)
 struct Config {
     std::string input_file;
     std::string output_file;
-    ReorderAlgo reorder         = ReorderAlgo::None;
+    ReorderAlgo reorder         = ReorderAlgo::Groot;
 };
 
 std::string option_hints =

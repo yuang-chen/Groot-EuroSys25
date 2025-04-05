@@ -14,5 +14,7 @@ int main(int argc, char** argv)
 
     reorder_graph(config, A_csr);
 
+    write_matrix_file(A_csr, config.output_file);
+
     return 0;
 }

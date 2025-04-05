@@ -26,5 +26,5 @@ The supported format is `mtx` and binary `csr`.
 ## Running the example
 
 ```bash
-./build/apps/groot -i /path/to/matrix/file -o /path/to/store/reordered/file
+./build/apps/groot -i ./toydata/cora.csr -o ./toydata/cora_groot.csr
 ```
