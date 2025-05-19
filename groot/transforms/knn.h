@@ -164,7 +164,7 @@ void clean_graph(const CSR& csr, COO& coo)
     coo.resize(csr.num_rows, csr.num_cols, csr.num_entries);
     coo.column_indices = csr.column_indices;
     coo.values         = csr.values;
-    get_row_indices_from_pointers(coo.row_indices, csr.row_pointers);
+    get_row_indices_from_pointers(csr.row_pointers, coo.row_indices);
 
     auto row_col_begin =
         thrust::make_zip_iterator(thrust::make_tuple(coo.row_indices.begin(), coo.column_indices.begin()));
