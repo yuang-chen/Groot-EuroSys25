@@ -1,6 +1,5 @@
 #pragma once
 
-
 // C++ Standard Library
 #include <algorithm>
 #include <cmath>
@@ -36,8 +35,6 @@ template<typename T, typename U>
 using MinHeapPair =
     std::priority_queue<std::pair<T, U>, thrust::host_vector<std::pair<T, U>>, std::greater<std::pair<T, U>>>;
 
-
-
 auto sparse_hamming_distance = [](const thrust::host_vector<int>& a, const thrust::host_vector<int>& b) {
     float distance = 0;
     int   i = 0, j = 0;
@@ -64,7 +61,6 @@ auto sparse_hamming_distance = [](const thrust::host_vector<int>& a, const thrus
 
     return distance;
 };
-
 
 template<typename CSR>
 void convert_csr_to_adj(const CSR& mat, AdjVector<int>& adj)
@@ -112,7 +108,6 @@ void set_search_params(Params& search_params, int K)
     // search_params.init = 1000;
     // search_params.seed = 1;
 }
-
 
 template<typename CSR1, typename CSR2>
 auto build_KNN_offline(const CSR1& mat, CSR2& knn)
@@ -341,6 +336,46 @@ auto perform_DFS(const Tree& tree, const Vector& roots, Vector& new_ids)
     return max_depth;
 }
 
+template<typename CSR1, typename CSR2>
+auto build_KNN(const CSR1& mat, CSR2& knn)
+{
+    const auto     nrow = mat.num_rows;
+    AdjVector<int> graph;
+
+    convert_csr_to_adj(mat, graph);
+    AdjOracle<int> oracle(graph, sparse_hamming_distance);
+
+    kgraph::KGraph::IndexParams  index_params;
+    kgraph::KGraph::SearchParams search_params;
+    //! parameter tuning:
+    //! https://github.com/Lsyhprum/WEAVESS/tree/dev/parameters
+    unsigned i_k = std::min<unsigned>(nrow - 1, 20);  // 200
+    unsigned i_l = std::min<unsigned>(i_k + 50, 30);  // 300
+    unsigned s_k = std::min<unsigned>(nrow - 1, 25);  // 250
+    set_index_params(index_params, i_k, i_l);
+    set_search_params(search_params, s_k);
+
+    kgraph::KGraph* index = kgraph::KGraph::create();
+    index->build(oracle, index_params);
+    const unsigned nnz = nrow * s_k;
+    ASSERT(nnz < std::numeric_limits<unsigned>::max());
+
+    knn.resize(nrow, nrow, nnz);
+    thrust::sequence(knn.row_pointers.begin(), knn.row_pointers.end(), unsigned(0), s_k);
+
+#pragma omp parallel for
+    for (unsigned i = 0; i < nrow; i++) {
+        auto&                      query     = graph[i];
+        auto                       row_begin = i * s_k;
+        kgraph::KGraph::SearchInfo info;
+        index->search(oracle.query(query),
+                      search_params,
+                      knn.column_indices.data() + row_begin,
+                      knn.values.data() + row_begin,
+                      &info);
+    }
+    delete index;
+}
 
 template<typename CSR, typename Vector>
 auto groot(const CSR& mat, Vector& new_ids)

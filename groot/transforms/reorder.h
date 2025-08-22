@@ -44,7 +44,6 @@ void build_csr_cpu(CsrMatrix& mat, const Vector& new_id)
     thrust::copy(new_row.begin(), new_row.end(), mat.row_pointers.begin());
     thrust::copy(new_col.begin(), new_col.end(), mat.column_indices.begin());
     thrust::copy(new_val.begin(), new_val.end(), mat.values.begin());
-
 }
 
 template<typename CsrMatrix, typename Vector>
@@ -56,7 +55,15 @@ void build_csr_gpu(CsrMatrix& mat, const Vector& new_id)
 
     thrust::device_vector<IndexType> new_degree(mat.num_rows, 0);
 
-    get_row_lengths_from_pointers(new_degree, mat.row_pointers);
+    // Assign the outdegree to new id (same logic as CPU version)
+    thrust::for_each(thrust::device,
+                     thrust::make_counting_iterator<IndexType>(0),
+                     thrust::make_counting_iterator<IndexType>(mat.num_rows),
+                     [row_ptr    = thrust::raw_pointer_cast(mat.row_pointers.data()),
+                      new_degree = thrust::raw_pointer_cast(new_degree.data()),
+                      new_id     = thrust::raw_pointer_cast(new_id.data())] __device__(IndexType i) {
+                         new_degree[new_id[i]] = row_ptr[i + 1] - row_ptr[i];
+                     });
 
     // Build new row_index array
     thrust::device_vector<IndexType> new_row(mat.num_rows + 1, 0);
@@ -96,10 +103,6 @@ void build_csr_gpu(CsrMatrix& mat, const Vector& new_id)
 template<typename Config, typename CsrMatrix>
 void reorder_graph(Config config, CsrMatrix& mat)
 {
-    if (config.reorder == ReorderAlgo::None) {
-        return;
-    }
-
     printf("\n\n----------------Reordering Graph----------------\n");
     thrust::device_vector<int> new_ids(mat.num_rows);
 

@@ -3,14 +3,6 @@
 namespace groot {
 
 template<typename Vector>
-void get_row_lengths_from_pointers(Vector& rowlen, const Vector& rowptr)
-{
-    using IndexType = typename Vector::value_type;
-    thrust::transform(rowptr.begin() + 1, rowptr.end(), rowptr.begin(), rowlen.begin(), thrust::minus<IndexType>());
-}
-
-
-template<typename Vector>
 void get_row_indices_from_pointers(const Vector& row_pointers, Vector& row_indices)
 {
     using IndexType   = typename Vector::value_type;

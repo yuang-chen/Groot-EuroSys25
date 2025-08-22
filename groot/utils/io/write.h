@@ -32,8 +32,6 @@ bool write_into_csr(const CsrMatrix& mat, std::string output)
     return true;
 };
 
-
-
 template<typename CsrMatrix>
 bool write_into_mtx(const CsrMatrix& mat, std::string out)
 {
@@ -52,7 +50,7 @@ bool write_into_mtx(const CsrMatrix& mat, std::string out)
     output << nrow << " " << nrow << " " << nnz << '\n';
     for (unsigned i = 0; i < nrow; i++) {
         for (unsigned j = row_ptr[i]; j < row_ptr[i + 1]; j++) {
-            output << i << " " << col_idx[j] << '\n';
+            output << i + 1 << " " << col_idx[j] + 1 << '\n';
         }
     }
     output.close();

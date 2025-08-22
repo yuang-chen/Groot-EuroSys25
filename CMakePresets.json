@@ -12,7 +12,7 @@
         "CMAKE_CXX_COMPILER": "/usr/bin/g++",
         "CMAKE_C_COMPILER": "/usr/bin/gcc",
         "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++",
-        "CMAKE_CUDA_COMPILER": "/usr/local/cuda-12.3/bin/nvcc",
+        "CMAKE_CUDA_COMPILER": "/usr/local/cuda/bin/nvcc",
         "CMAKE_TOOLCHAIN_FILE": "/home/ychen/Software/vcpkg/scripts/buildsystems/vcpkg.cmake"
       }
     },

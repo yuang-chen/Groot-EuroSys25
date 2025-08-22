@@ -5,30 +5,13 @@
 
 namespace groot {
 
-enum class ReorderAlgo { None = 0, Groot = 1};
-
-const char* reorder_algo_to_string(ReorderAlgo algo)
-{
-    switch (algo) {
-        case ReorderAlgo::None:
-            return "None";
-        case ReorderAlgo::Groot:
-            return "Groot";
-        default:
-            return "Unknown";
-    }
-}
-
 struct Config {
     std::string input_file;
     std::string output_file;
-    ReorderAlgo reorder         = ReorderAlgo::Groot;
 };
 
-std::string option_hints =
-    "              [-i input_file]\n"
-    "              [-o output_file]\n"
-    "              [-r reorder_algorithm (0: none, 1: groot)]\n";
+std::string option_hints = "              [-i input_file]\n"
+                           "              [-o output_file]\n";
 
 auto program_options(int argc, char* argv[])
 {
@@ -46,9 +29,6 @@ auto program_options(int argc, char* argv[])
             case 'o':
                 config.output_file = optarg;
                 break;
-            case 'r':
-                config.reorder = static_cast<ReorderAlgo>(std::stoi(optarg));
-                break;
             default:
                 printf("Usage: %s ... \n%s", argv[0], option_hints.c_str());
                 exit(EXIT_FAILURE);
@@ -56,12 +36,12 @@ auto program_options(int argc, char* argv[])
     }
 
     printf("--------experimental setting--------\n");
+    printf("reorder algorithm: Groot\n");
+
     if (!config.input_file.empty()) {
         printf("input path: %s\n", config.input_file.c_str());
     }
-    if (config.reorder != ReorderAlgo::None) {
-        printf("reorder algorithm: %s\n", reorder_algo_to_string(config.reorder));
-    }
+
     if (!config.output_file.empty()) {
         printf("output path: %s\n", config.output_file.c_str());
     }
