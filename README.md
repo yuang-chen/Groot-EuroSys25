@@ -47,7 +47,7 @@ Due to the inherent randomness in kNN, each reordering might result in a differe
 ```
 
 ## Performance Tuning
-For optimal K-Nearest Neighbors (KNN) performance, consider adjusting the parameters of KGraph. Detailed guidance can be found in the [WEAVESS documentation](https://github.com/Lsyhprum/WEAVESS/tree/dev/parameters]).
+For optimal K-Nearest Neighbors (KNN) performance, consider adjusting the parameters of KGraph. Detailed guidance can be found in the [WEAVESS documentation](https://github.com/Lsyhprum/WEAVESS/tree/dev/parameters).
 
 ```c++
 // Example configuration in build_KNN(), located in knn.h
