@@ -84,13 +84,12 @@ void build_csr_gpu(CsrMatrix& mat, const Vector& new_id)
                       new_col = thrust::raw_pointer_cast(new_col.data()),
                       new_val = thrust::raw_pointer_cast(new_val.data()),
                       new_id  = thrust::raw_pointer_cast(new_id.data())] __device__(IndexType i) {
-                         IndexType start     = row_ptr[i];
-                         IndexType end       = row_ptr[i + 1];
+                         IndexType count     = 0;
                          IndexType new_start = new_row[new_id[i]];
-                         for (IndexType j = start; j < end; ++j) {
-                             IndexType offset            = j - start;
-                             new_col[new_start + offset] = new_id[col_idx[j]];
-                             new_val[new_start + offset] = values[j];
+                         for (IndexType j = row_ptr[i]; j < row_ptr[i + 1]; ++j) {
+                             new_col[new_start + count] = new_id[col_idx[j]];
+                             new_val[new_start + count] = values[j];
+                             count++;
                          }
                      });
 

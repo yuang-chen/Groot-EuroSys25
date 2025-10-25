@@ -121,8 +121,8 @@ auto build_KNN_offline(const CSR1& mat, CSR2& knn)
     kgraph::KGraph::IndexParams index_params;
     //! parameter tuning:
     //! https://github.com/Lsyhprum/WEAVESS/tree/dev/parameters
-    unsigned i_k = std::min<unsigned>(nrow - 1, 200);
-    unsigned i_l = std::min<unsigned>(i_k + 50, 300);
+    unsigned i_k = std::min<unsigned>(nrow - 1, 20);
+    unsigned i_l = std::min<unsigned>(i_k + 50, 30);
     set_index_params(index_params, i_k, i_l);
 
     kgraph::KGraph* index = kgraph::KGraph::create();
@@ -390,7 +390,7 @@ auto groot(const CSR& mat, Vector& new_ids)
 
     timer.start();
 
-    build_KNN_offline(mat, knn);  // reverse edges -> undirected
+    build_KNN(mat, knn);  // reverse edges -> undirected
     timer.stop();
     printf("[kGraph] time (ms): %f \n", timer.elapsed());
 
