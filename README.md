@@ -1,6 +1,28 @@
 # Groot
 Groot: Graph-Centric Row Reordering with Tree for Sparse Matrix Multiplication on Tensor Cores
 
+## Python Implementation (Update)
+
+**NEW**: A Python implementation (`groot.py`) is now available, providing a more flexible solution
+
+```bash
+# Install dependencies
+pip install pynndescent 
+
+# Basic usage
+python groot.py --dataset cora
+
+# Complete Usage
+python groot.py -h
+usage: groot.py [-h] [--dataset DATASET] [--knn KNN] [--similarity_metric {jaccard,hamming}] [--no_mst] [--traversal {dfs,bfs}]
+                [--start_node {max_degree,random,first}] [--cache_dir CACHE_DIR] [--no_cache] [--force_rebuild]
+                [--input_dir INPUT_DIR] [--output_dir OUTPUT_DIR]
+```
+
+Key features: k-NN graph construction (Jaccard or Hamming) → k-NN + BFS or k-NN + MST + DFS for row ordering.
+
+**Note**: DFS requires MST extraction since k-NN graphs have cycles; BFS works directly on k-NN graphs. Jaccard seems to work better than Hamming in the python version.
+
 ## Prerequisites
 - CMake 3.28
 - CUDA Toolkit 12.3
