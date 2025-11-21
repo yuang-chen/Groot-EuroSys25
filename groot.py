@@ -14,9 +14,11 @@ Optimizations applied:
 - Vectorized edge reordering with NumPy (~100x faster)
 - Dict comprehension for reorder mapping (cleaner, faster)
 - k-NN neighbor graph caching for instant reuse
+- CUSTOM SPARSE METRICS: Uses optimized sparse.py implementations
 
 Dependencies:
 - PyNNDescent: pip install pynndescent
+- sparse.py (Must be in same directory)
 
 Author: YuAng
 Date: 2025-11-17
@@ -32,6 +34,10 @@ import os
 import os.path as osp
 import argparse
 from collections import deque
+import numba
+
+# Import custom sparse metrics from sparse.py
+from sparse import sparse_jaccard, sparse_hamming
 
 def setup_seed(seed):
     np.random.seed(seed)
@@ -169,7 +175,7 @@ else:
 
 print(f"Matrix: {num_row} x {num_col}, nnz: {num_nnz}")
 
-scipy_coo = coo_matrix((np.ones(num_nnz, dtype=np.int32), (src_li, dst_li)), shape=(num_row, num_row))
+scipy_coo = coo_matrix((np.ones(num_nnz, dtype=np.float32), (src_li, dst_li)), shape=(num_row, num_row))
 scipy_csr = scipy_coo.tocsr()
 row_ind = np.array(src_li)
 col_ind = np.array(dst_li)
@@ -185,6 +191,36 @@ print(f"Row degree stats - min: {row_degrees.min()}, max: {row_degrees.max()}, "
 print(f"Using similarity metric: {args.similarity_metric}")
 
 # ============================================================================
+# Prepare Custom Metric Functions
+# ============================================================================
+
+def create_hamming_metric(n_features):
+    """
+    Creates a closure for the sparse_hamming function to inject n_features,
+    as PyNNDescent expects metric(ind1, data1, ind2, data2).
+    """
+    # We must use default argument val=n_features to capture the variable 
+    # at definition time for the jitted function
+    @numba.njit()
+    def impl(ind1, data1, ind2, data2):
+        return sparse_hamming(ind1, data1, ind2, data2, n_features)
+    return impl
+
+# Select the appropriate function from sparse.py
+metric_func = None
+metric_name_for_cache = ""
+
+if args.similarity_metric == 'jaccard':
+    metric_func = sparse_jaccard
+    metric_name_for_cache = 'sparse_jaccard'
+elif args.similarity_metric == 'hamming':
+    # sparse_hamming needs the number of features (columns)
+    metric_func = create_hamming_metric(num_col)
+    metric_name_for_cache = 'sparse_hamming'
+else:
+    raise ValueError(f"Unknown metric: {args.similarity_metric}")
+
+# ============================================================================
 # Build k-NN Graph using Efficient Library
 # ============================================================================
 
@@ -194,14 +230,7 @@ t_knn_start = time.time()
 # k-NN graph represented as adjacency list with weights
 knn_graph = [[] for _ in range(num_row)]  # knn_graph[i] = [(neighbor_id, similarity), ...]
 
-print("Building k-NN graph using PyNNDescent...")
-
-# Map metric names
-metric_map = {
-    'jaccard': 'jaccard',
-    'hamming': 'hamming'
-}
-pynnd_metric = metric_map.get(args.similarity_metric, 'jaccard')
+print(f"Building k-NN graph using PyNNDescent with custom metric: {metric_name_for_cache}...")
 
 # Setup cache path
 use_cache = not args.no_cache
@@ -210,11 +239,10 @@ index_loaded = False
 
 if use_cache:
     os.makedirs(args.cache_dir, exist_ok=True)
-    # Cache the neighbor graph (numpy arrays) instead of the PyNNDescent object
-    # This is more reliable than pickling compiled Numba functions
+    # Cache the neighbor graph (numpy arrays)
     cache_filename = osp.join(
         args.cache_dir, 
-        f"{dataset}_k{args.knn}_{pynnd_metric}_neighbors.npz"
+        f"{dataset}_k{args.knn}_{metric_name_for_cache}_neighbors.npz"
     )
     
     # Try to load cached neighbor graph
@@ -222,7 +250,6 @@ if use_cache:
         print(f"  Loading cached neighbor graph from: {cache_filename}")
         try:
             t_load_start = time.time()
-            # allow_pickle=True since we're loading our own trusted cache files
             cached_data = np.load(cache_filename, allow_pickle=True)
             neighbors = cached_data['neighbors']
             distances = cached_data['distances']
@@ -234,14 +261,16 @@ if use_cache:
 
 # Build index if not loaded from cache
 if not index_loaded:
-    print(f"  Building index with metric={pynnd_metric}, n_neighbors={args.knn + 1}")
+    print(f"  Building index with custom metric, n_neighbors={args.knn + 1}")
     if args.force_rebuild:
         print("  (forced rebuild)")
     
     t_build_start = time.time()
+    
+    # Pass the actual function object to metric
     index = NNDescent(
         scipy_csr,
-        metric=pynnd_metric,
+        metric=metric_func,
         n_neighbors=args.knn + 1,  # +1 to account for self
         random_state=2022,
         verbose=True,
@@ -252,7 +281,7 @@ if not index_loaded:
     # Get neighbors and distances from the newly built index
     neighbors, distances = index.neighbor_graph
     
-    # Save neighbor graph to cache (numpy arrays - reliable!)
+    # Save neighbor graph to cache
     if use_cache and cache_filename:
         print(f"  Saving neighbor graph to cache: {cache_filename}")
         try:
@@ -266,8 +295,8 @@ for i in range(num_row):
     for j, (neighbor_id, dist) in enumerate(zip(neighbors[i], distances[i])):
         if neighbor_id >= 0 and neighbor_id != i:  # Skip self
             # Convert distance to similarity
-            # For Jaccard: distance = 1 - similarity, so similarity = 1 - distance
-            # For Hamming: distance is normalized, so similarity = 1 - distance
+            # sparse.py metrics return distances (dissimilarity)
+            # Similarity = 1.0 - distance
             similarity = 1.0 - dist if dist < 1.0 else 0.0
             knn_graph[i].append((neighbor_id, similarity))
 
@@ -290,7 +319,6 @@ if args.use_mst:
     t_mst_start = time.time()
     
     # Convert k-NN graph to dense adjacency matrix for MST extraction
-    # Note: We use distances (1 - similarity) for MST since it finds minimum
     from scipy.sparse import lil_matrix
     
     # Build symmetric distance matrix
@@ -469,7 +497,7 @@ np.savez(osp.join(args.output_dir, dataset + output_suffix + ".reorder.npz"),
 
 # Also save in binary CSR format (for C++ compatibility)
 print("Converting reordered matrix to CSR format...")
-reordered_coo = coo_matrix((np.ones(num_nnz, dtype=np.int32), 
+reordered_coo = coo_matrix((np.ones(num_nnz, dtype=np.float32), 
                            (new_row_ind, new_col_ind)), 
                            shape=(num_row, num_col))
 reordered_csr = reordered_coo.tocsr()
